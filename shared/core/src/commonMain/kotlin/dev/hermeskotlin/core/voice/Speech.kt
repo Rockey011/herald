@@ -1,5 +1,6 @@
 package dev.hermeskotlin.core.voice
 
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
@@ -105,6 +106,17 @@ interface VoiceRecorder {
 
     /** Ends the recording in progress now and keeps what was said. */
     fun finish()
+
+    /**
+     * Listens while the agent works and speaks, for someone talking over it ([bargeIn] decides), with the echo
+     * cancelling a call uses. [playing] says whether the voice is sounding right now; [onTrip] fires the moment
+     * someone cuts in, and [onLevel] gets the input level from then on. Returns what they said, from its first
+     * syllable, once they pause; null when the microphone couldn't listen. Cancelling stops it.
+     *
+     * A recorder that can't listen over the voice never returns, so nobody ever cuts in.
+     */
+    suspend fun listenOver(bargeIn: BargeIn, playing: () -> Boolean, onTrip: () -> Unit, onLevel: (Float) -> Unit = {}): Recording? =
+        awaitCancellation()
 }
 
 /**

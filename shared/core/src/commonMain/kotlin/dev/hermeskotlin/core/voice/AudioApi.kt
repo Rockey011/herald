@@ -15,6 +15,10 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -125,6 +129,27 @@ class AudioApi(private val client: HttpClient) {
             timeout { requestTimeoutMillis = LEASE_MS }
         }
     }.map { }
+
+    /**
+     * Whether talking over a reply cuts in, and how readily: the profile's `voice.barge_in`,
+     * `voice.barge_in_threshold_multiplier` and `voice.barge_in_grace_seconds`. Where they can't be read (an
+     * older gateway, say), Hermes's defaults: on, at the stock levels.
+     */
+    suspend fun bargeIn(url: GatewayUrl, profile: String?): BargeInSettings {
+        val config = apiCall {
+            client.get(url.resolve("api/config")) {
+                profile?.let { parameter("profile", it) }
+            }
+        }.map { it.body<JsonObject>() }
+        val voice = ((config as? ApiResult.Success)?.value?.get("voice") as? JsonObject) ?: return BargeInSettings()
+        fun value(key: String) = voice[key] as? JsonPrimitive
+        return BargeInSettings(
+            enabled = value("barge_in")?.booleanOrNull ?: true,
+            multiplier = value("barge_in_threshold_multiplier")?.doubleOrNull,
+            graceMs = value("barge_in_grace_seconds")?.doubleOrNull?.takeIf { it >= 0 }?.let { (it * 1000).toLong() }
+                ?: BargeInSettings.DEFAULT_GRACE_MS,
+        )
+    }
 
     private companion object {
         const val SLOW_MS = 120_000L
