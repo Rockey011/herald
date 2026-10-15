@@ -78,7 +78,25 @@ class BargeInTest {
         val mic = Mic(bargeIn)
         assertNull(mic.feed(0.1f, 1_000))
         assertEquals(BargeIn.TRIGGER_CEILING_LEVEL, bargeIn.trigger(playing = true))
+        // The voice is quiet under the room's noise, so the bar stays at the cap.
+        assertNull(mic.feed(0.1f, 1_000, playing = true))
         assertNotNull(mic.feed(0.3f, 1_000, playing = true))
+    }
+
+    /** A loudspeaker with no echo cancelling: its own voice comes back loud, and mustn't pass for someone talking. */
+    @Test
+    fun aLoudEchoRaisesTheBarAboveItself() {
+        val bargeIn = BargeIn()
+        val mic = Mic(bargeIn)
+        assertNull(mic.feed(0.01f, 1_000))
+        // Syllables well over the stock bar, the whole reply long.
+        repeat(20) {
+            assertNull(mic.feed(0.35f, 200, playing = true))
+            assertNull(mic.feed(0.15f, 200, playing = true))
+        }
+        assertTrue(bargeIn.trigger(playing = true) > 0.35f)
+        // Someone talking clearly over it still cuts in.
+        assertNotNull(mic.feed(0.9f, 1_000, playing = true))
     }
 
     @Test

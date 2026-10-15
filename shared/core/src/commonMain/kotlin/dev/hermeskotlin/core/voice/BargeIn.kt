@@ -25,6 +25,8 @@ data class BargeInSettings(
  * - The room's quiet floor is measured only while nothing plays, and held while the voice plays: measured over
  *   the speaker, its bleed would sit in the floor and the bar would be out of reach.
  * - While the voice plays, the bar is raised so its bleed alone can't trip it, and capped so speech still can.
+ * - Unlike Desktop, it also learns how loud the voice actually comes back (its louder syllables) and keeps the bar
+ *   clearly above that, so a loudspeaker the phone can't cancel doesn't cut in on itself.
  * - The voice's first moment after a real gap can't trip it ([BargeInSettings.graceMs]).
  * - Speech has to hold: most of the last [SUSTAINED_MS] above the bar, so dips inside a word don't start it over.
  *
@@ -37,12 +39,15 @@ class BargeIn(private val settings: BargeInSettings = BargeInSettings(), private
     private val scale = settings.multiplier?.takeIf { it.isFinite() && it > 0 }?.let { it / DEFAULT_MULTIPLIER } ?: 1.0
     private val floorMultiplier = (FLOOR_MULTIPLIER * scale).toFloat()
     private val playbackMin = (PLAYBACK_MIN_LEVEL * scale).toFloat()
+    private val bleedMultiplier = (BLEED_MULTIPLIER * scale).toFloat()
 
     var tripped = false
         private set
 
     private val floorSamples = ArrayDeque<Float>()
     private var floor = 0f
+    private val bleedSamples = ArrayDeque<Float>()
+    private var bleed = 0f
     private var calibratedSince = -1L
     private var floorLocked = false
     private var wasPlaying = false
@@ -75,6 +80,9 @@ class BargeIn(private val settings: BargeInSettings = BargeInSettings(), private
         val trigger = trigger(playing)
         // The room drifts; follow it while it's quiet.
         if (floorLocked && !playing && level < trigger) addFloor(level)
+        // How loud the voice comes back through the microphone, which echo cancelling may or may not have taken out.
+        // Learnt from all of its first moment (nothing can trip it then), and after that from what stays under the bar.
+        if (playing && (nowMs < graceUntil || level < trigger)) addBleed(level)
         val above = floorLocked && level >= trigger && nowMs >= graceUntil
         recent.addLast(nowMs to above)
         while (recent.isNotEmpty() && nowMs - recent.first().first > SUSTAINED_MS) recent.removeFirst()
@@ -91,7 +99,9 @@ class BargeIn(private val settings: BargeInSettings = BargeInSettings(), private
     /** The bar speech has to clear now. */
     internal fun trigger(playing: Boolean): Float {
         val quiet = max(MIN_TRIGGER_LEVEL, floor * floorMultiplier)
-        return if (playing) min(max(quiet, playbackMin), TRIGGER_CEILING_LEVEL) else quiet
+        if (!playing) return quiet
+        // Over the voice: never under its own echo, however loud the speaker. Speech has to stand clearly above it.
+        return max(min(max(quiet, playbackMin), TRIGGER_CEILING_LEVEL), bleed * bleedMultiplier)
     }
 
     /** After the trip the voice is already cut, so a plain pause ends the utterance. */
@@ -100,6 +110,13 @@ class BargeIn(private val settings: BargeInSettings = BargeInSettings(), private
         else if (quietSince < 0) quietSince = nowMs
         val done = quietSince >= 0 && nowMs - quietSince >= silenceMs || nowMs - trippedAt >= UTTERANCE_MAX_MS
         return if (done) Step.Done else Step.Hearing
+    }
+
+    private fun addBleed(level: Float) {
+        bleedSamples.addLast(level)
+        if (bleedSamples.size > FLOOR_SAMPLES) bleedSamples.removeFirst()
+        // Its louder syllables, not its average: the voice's peaks are what could pass for someone talking.
+        bleed = bleedSamples.sorted()[(bleedSamples.size * BLEED_PERCENTILE).toInt().coerceAtMost(bleedSamples.size - 1)]
     }
 
     private fun addFloor(level: Float) {
@@ -125,9 +142,11 @@ class BargeIn(private val settings: BargeInSettings = BargeInSettings(), private
         const val CALIBRATION_MS = 400L
         const val SUSTAINED_MS = 300L
         const val SUSTAINED_MAJORITY = 0.8f
-        const val MIN_TRIGGER_LEVEL = 0.04f
+        const val MIN_TRIGGER_LEVEL = 0.025f
         const val FLOOR_MULTIPLIER = 3.5
-        const val PLAYBACK_MIN_LEVEL = 0.09
+        const val PLAYBACK_MIN_LEVEL = 0.05
+        const val BLEED_MULTIPLIER = 1.8
+        const val BLEED_PERCENTILE = 0.8f
         const val TRIGGER_CEILING_LEVEL = 0.25f
         const val PLAYBACK_GAP_FOR_GRACE_MS = 1_000L
         /** Three seconds of 20 ms frames. */
