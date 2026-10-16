@@ -114,6 +114,7 @@ import dev.hermeskotlin.ui.chat.ChatView
 import dev.hermeskotlin.ui.chat.ModelPickerState
 import dev.hermeskotlin.ui.chat.ModelSheet
 import dev.hermeskotlin.ui.voice.DictationState
+import dev.hermeskotlin.ui.voice.ReadAloudState
 import dev.hermeskotlin.ui.voice.VoiceChatState
 
 /** The screens the README shows, drawn from [ChatSamples]. */
@@ -129,6 +130,8 @@ enum class PreviewScene(val label: String) {
     Undelivered("Messages that lost their reply"),
     Subagents("Subagents"),
     Voice("Voice chat"),
+    ReadAloud("A reply being read aloud"),
+    ReadAloudFailed("A reply the gateway couldn't voice"),
     NewChat("A new chat"),
     Sidebar("The sessions sidebar"),
     Bots("The bots and rooms"),
@@ -214,6 +217,8 @@ fun HeraldPreview(scene: PreviewScene, dark: Boolean = true, accent: String = DE
                 PreviewScene.Undelivered -> SampleChat(ChatSamples.undelivered)
                 PreviewScene.Subagents -> SampleChat(ChatSamples.subagents)
                 PreviewScene.Voice -> SampleChat(ChatSamples.voice, voiceChat = ChatSamples.listening)
+                PreviewScene.ReadAloud -> SampleChat(ChatSamples.reply, readAloud = ReadAloudState(key = "a1"))
+                PreviewScene.ReadAloudFailed -> SampleChat(ChatSamples.reply, readAloud = ReadAloudState(error = "Speech synthesis failed"))
                 PreviewScene.NewChat -> SampleChat(ChatSamples.empty, placeholder = "What are we building?")
                 PreviewScene.Sidebar -> OpenSidebar {
                     SessionsSidebarSample(
@@ -632,6 +637,7 @@ private class PreviewRoomActions : RoomActions {
 private fun SampleChat(
     state: ChatState,
     voiceChat: VoiceChatState = VoiceChatState(),
+    readAloud: ReadAloudState = ReadAloudState(),
     placeholder: String = ChatSamples.PLACEHOLDER,
     comments: List<PendingComment> = emptyList(),
     composerText: String = "",
@@ -650,6 +656,7 @@ private fun SampleChat(
         comments = comments,
         voiceChat = voiceChat,
         dictation = DictationState(),
+        readAloud = readAloud,
         suggestions = emptyList(),
         sprite = null,
         placeholder = placeholder,

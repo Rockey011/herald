@@ -115,6 +115,13 @@ interface ChatActions {
     fun dismissVoiceChatError()
 
     fun dismissDictationError()
+
+    /** Reads reply [key] aloud with the gateway's voice; [text] is the reply as shown. Another being read stops. */
+    fun readAloud(key: String, text: String) {}
+
+    fun stopReading() {}
+
+    fun dismissReadAloudError() {}
 }
 
 /**
