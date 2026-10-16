@@ -19,11 +19,13 @@ import dev.hermeskotlin.core.voice.SpokenAudio
 import dev.hermeskotlin.core.voice.VoiceActivity
 import dev.hermeskotlin.core.voice.VoiceRecorder
 import dev.hermeskotlin.core.voice.isVoiceStopCommand
+import dev.hermeskotlin.core.voice.readAloudText
 import dev.hermeskotlin.core.voice.speakableText
 import dev.hermeskotlin.core.voice.speechChunks
 import dev.hermeskotlin.core.voice.speakableSoFar
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -78,12 +80,21 @@ data class DictationState(
     val active: Boolean get() = recording || transcribing
 }
 
+/** A reply read aloud from the chat, outside a voice chat. */
+data class ReadAloudState(
+    /** The reply being read, by its message key; null when none is. */
+    val key: String? = null,
+    /** Why the last reply couldn't be read. */
+    val error: String? = null,
+)
+
 /**
  * Voice on this device, Desktop's way: the phone records, the gateway transcribes with the profile's
  * speech-to-text and voices replies with its text-to-speech, and the phone plays them.
  *
  * Dictation drops a transcript into the composer. A voice chat loops: listen until you stop talking,
- * send what you said, wait for the reply, read it aloud, listen again; saying "stop" ends it.
+ * send what you said, wait for the reply, read it aloud, listen again; saying "stop" ends it. Read aloud
+ * voices one finished reply from the chat.
  *
  * When the profile picked GPT-Live (`voice.voice_chat_mode: gpt-live`) and the device can make the call
  * ([liveCalls]), a voice chat is a live call instead: see [LiveConversation].
@@ -109,12 +120,16 @@ class VoiceController(
     private val _dictation = MutableStateFlow(DictationState())
     val dictation: StateFlow<DictationState> = _dictation.asStateFlow()
 
+    private val _reading = MutableStateFlow(ReadAloudState())
+    val reading: StateFlow<ReadAloudState> = _reading.asStateFlow()
+
     private var chatJob: Job? = null
     private var stoppedByUser = false
     private var speechJob: Job? = null
     /** The gateway whose speech socket couldn't open in this chat; its replies are read out once they're done. */
     private var noSpeechStream: GatewayUrl? = null
     private var dictationJob: Job? = null
+    private var readingJob: Job? = null
     /** The recognizer the dictation in progress listens with; null when the gateway transcribes it. */
     private var dictating: DeviceDictation? = null
     /** The dictation in progress was asked to finish; a gateway fallback doesn't start recording then. */
@@ -128,6 +143,8 @@ class VoiceController(
     fun startChat(session: ChatSession, gateway: GatewayUrl, profile: String?, pauseMs: Long = VoiceActivity().silenceMs) {
         if (chatJob?.isActive == true) return
         cancelDictation()
+        // The voice chat has the speaker now.
+        stopReading()
         _chat.value = VoiceChatState(VoicePhase.Listening)
         stoppedByUser = false
         noSpeechStream = null
@@ -187,12 +204,13 @@ class VoiceController(
     }
 
     /**
-     * Herald went out of sight. Dictation stops; a voice chat carries on when it's held up, like a call,
-     * and stops otherwise, since Android doesn't let the app listen from the background.
+     * Herald went out of sight. Dictation and Read aloud stop; a voice chat carries on when it's held up, like a
+     * call, and stops otherwise, since Android doesn't let the app listen from the background.
      */
     fun onBackground() {
         away = true
         cancelDictation()
+        stopReading()
         if (!held) stopChat()
     }
 
@@ -436,39 +454,81 @@ class VoiceController(
         if (it.phase == VoicePhase.Speaking || it.phase == VoicePhase.Thinking) it.copy(phase = if (sound) VoicePhase.Speaking else VoicePhase.Thinking) else it
     }
 
-    /** Reads [text] aloud piece by piece, synthesizing the next piece while the current one plays. */
+    /** Reads [text] aloud in the voice chat; Skip cuts it. */
     private suspend fun speak(text: String, gateway: GatewayUrl, profile: String?) = coroutineScope {
         // A child of the conversation, so ending the chat stops the voice; skipping cancels only this.
-        val job = launch {
-            coroutineScope {
-                val clips = Channel<SpokenAudio>(capacity = 1)
-                launch {
-                    for (chunk in speechChunks(text)) {
-                        when (val result = audio.speak(gateway, chunk, profile)) {
-                            is ApiResult.Success -> clips.send(result.value)
-                            else -> {
-                                _chat.update { it.copy(error = result.errorMessage ?: "Couldn't voice the reply.") }
-                                break
-                            }
-                        }
-                    }
-                    clips.close()
-                }
-                for (clip in clips) {
-                    try {
-                        player.play(clip)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        _chat.update { it.copy(error = e.message ?: "Couldn't play the reply.") }
-                    }
-                }
-            }
-        }
+        val job = launch { voice(text, gateway, profile) { error -> _chat.update { it.copy(error = error) } } }
         speechJob = job
         job.join()
         speechJob = null
     }
+
+    /**
+     * Reads [text] aloud piece by piece, synthesizing the next piece while the current one plays. [onError] hears
+     * what went wrong: a piece the gateway couldn't voice ends it, one the player couldn't play is passed over.
+     */
+    private suspend fun voice(text: String, gateway: GatewayUrl, profile: String?, onError: (String) -> Unit) = coroutineScope {
+        val clips = Channel<SpokenAudio>(capacity = 1)
+        launch {
+            for (chunk in speechChunks(text)) {
+                when (val result = audio.speak(gateway, chunk, profile)) {
+                    is ApiResult.Success -> clips.send(result.value)
+                    else -> {
+                        onError(result.errorMessage ?: "Couldn't voice the reply.")
+                        break
+                    }
+                }
+            }
+            clips.close()
+        }
+        for (clip in clips) {
+            try {
+                player.play(clip)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onError(e.message ?: "Couldn't play the reply.")
+            }
+        }
+    }
+
+    /**
+     * Reads reply [key] aloud with the gateway's voice, the way the voice chat reads a finished reply: [reply]
+     * without its code, links, pictures and files. A reply already being read stops first. Not while a voice chat
+     * or dictation runs: they have the speaker and the microphone.
+     */
+    fun readAloud(key: String, reply: String, gateway: GatewayUrl, profile: String?) {
+        if (chatJob?.isActive == true || dictationJob?.isActive == true) return
+        stopReading()
+        val text = readAloudText(reply)
+        if (text.isEmpty()) return
+        _reading.value = ReadAloudState(key)
+        // Started once it's [readingJob], so its end can tell whether a newer one took over.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            var error: String? = null
+            try {
+                // The first thing that went wrong says why; what follows from it says less.
+                voice(text, gateway, profile) { if (error == null) error = it }
+            } finally {
+                // Stopped, or another reply started: that one keeps its own state.
+                if (readingJob === coroutineContext.job) {
+                    readingJob = null
+                    _reading.value = ReadAloudState(error = error)
+                }
+            }
+        }
+        readingJob = job
+        job.start()
+    }
+
+    /** Stops the reply being read aloud, and clears why the last one couldn't be. */
+    fun stopReading() {
+        readingJob?.cancel()
+        readingJob = null
+        _reading.value = ReadAloudState()
+    }
+
+    fun dismissReadAloudError() = _reading.update { it.copy(error = null) }
 
     /**
      * Starts dictating; the transcript goes to [onText]. Call [finishDictation] to stop early. With
@@ -485,6 +545,8 @@ class VoiceController(
         onText: (String) -> Unit,
     ) {
         if (dictationJob?.isActive == true || chatJob?.isActive == true) return
+        // The microphone would hear it.
+        stopReading()
         _dictation.value = DictationState(recording = true)
         val device = deviceDictation?.takeIf { engine == DictationEngine.Device && it.available() }
         dictating = device
@@ -557,6 +619,7 @@ class VoiceController(
     fun stopAll() {
         stopChat()
         cancelDictation()
+        stopReading()
     }
 
     private companion object {

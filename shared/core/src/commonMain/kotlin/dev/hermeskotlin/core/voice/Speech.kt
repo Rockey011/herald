@@ -1,5 +1,6 @@
 package dev.hermeskotlin.core.voice
 
+import dev.hermeskotlin.core.chat.extractReplyMedia
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
@@ -184,7 +185,7 @@ fun wav(pcm: ByteArray, sampleRate: Int, channels: Int = 1): ByteArray {
 private val FENCED_CODE = Regex("```[\\s\\S]*?(?:```|$)")
 private val INLINE_CODE = Regex("`([^`]+)`")
 private val MARKDOWN_LINK = Regex("""\[([^\]]+)\]\(([^)]+)\)""")
-private val URL = Regex("""\bhttps?://\S+""", RegexOption.IGNORE_CASE)
+private val URL = Regex("""\b(?:https?|file)://\S+""", RegexOption.IGNORE_CASE)
 private val MEDIA_PATH = Regex("""[ \t]*MEDIA:\S+?(?=[.,;:!?)\]]*(?:\s|$))""")
 private val LINE_FINAL_COLON = Regex(""":\s*$""", RegexOption.MULTILINE)
 private val HEADING = Regex("""^#{1,6}\s+""", RegexOption.MULTILINE)
@@ -214,6 +215,12 @@ fun speakableText(markdown: String): String = markdown
     .replace(MARKUP, "")
     .replace(WHITESPACE, " ")
     .trim()
+
+/**
+ * A finished reply as its Read aloud action says it: [speakableText] once the pictures and files it delivered
+ * are taken out, since they show as themselves. Empty when there's nothing to say, a reply of only code, say.
+ */
+fun readAloudText(reply: String): String = speakableText(extractReplyMedia(reply).first)
 
 /**
  * Cuts [text] into pieces of at most about [maxChars], at sentence ends where possible, so the first
